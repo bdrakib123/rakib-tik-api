@@ -4,13 +4,19 @@ require("dotenv").config();
 
 const app = express();
 
+// ===================
 // Middlewares
+// ===================
 app.use(cors());
 app.use(express.json());
 
-// 🔐 Protect only /api routes with API key
+// ===================
+// 🔐 API KEY PROTECTION
+// Only protect /api routes
+// ===================
 app.use("/api", (req, res, next) => {
-  const apiKey = req.headers["x-api-key"];
+  const apiKey =
+    req.headers["x-api-key"] || req.query.apikey;
 
   if (!apiKey || apiKey !== process.env.API_KEY) {
     return res.status(401).json({
@@ -22,11 +28,15 @@ app.use("/api", (req, res, next) => {
   next();
 });
 
+// ===================
 // Routes
+// ===================
 const tikRoutes = require("./routes/tikRoutes");
 app.use("/api", tikRoutes);
 
-// Home route (optional, no key required)
+// ===================
+// Home Route (No key needed)
+// ===================
 app.get("/", (req, res) => {
   res.json({
     status: true,
@@ -34,7 +44,19 @@ app.get("/", (req, res) => {
   });
 });
 
-// Start server
+// ===================
+// 404 Handler
+// ===================
+app.use((req, res) => {
+  res.status(404).json({
+    status: false,
+    message: "Route not found"
+  });
+});
+
+// ===================
+// Start Server
+// ===================
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {

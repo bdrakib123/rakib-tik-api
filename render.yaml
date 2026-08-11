@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: rakib-tik-api
+    runtime: node
+    buildCommand: npm install && npx playwright install chromium
+    startCommand: node index.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: API_KEY
+        sync: false
+      - key: TIKTOK_REGION
+        value: US
+      - key: TIKTOK_COOKIE_FILE
+        value: ./tiktok-cookie.txt
+      - key: SEARCH_LIMIT
+        value: "10"

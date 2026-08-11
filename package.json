@@ -13,10 +13,12 @@
   },
   "dependencies": {
     "@ssut/tiktok-api": "^1.5.2",
-    "axios": "^1.11.0",
+    "async-retry": "^1.3.3",
+    "axios": "^1.19.0",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
     "fs-extra": "^11.3.0",
+    "https-proxy-agent": "^9.1.0",
     "playwright": "^1.55.0"
   }
 }

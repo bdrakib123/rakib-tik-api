@@ -1,0 +1,17 @@
+{
+  "name": "tik-api-dl",
+  "version": "1.0.0",
+  "description": "TikTok Downloader and Search API",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@tobyg74/tiktok-api-dl": "latest",
+    "cors": "^2.8.6",
+    "express": "^5.1.0"
+  }
+}

@@ -67,7 +67,7 @@ app.get("/api/tiktok", async (req, res) => {
     console.log(`⬇️ TikTok Download: ${url}`);
 
     const response = await TikTokAPI.Downloader(url, {
-      version: "v3"
+      version: "v1"
     });
 
     if (

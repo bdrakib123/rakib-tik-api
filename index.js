@@ -1,6 +1,14 @@
 const express = require("express");
 const cors = require("cors");
-const { download } = require("@satorufx/mediadownloader");
+const axios = require("axios");
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+const crypto = require("crypto");
+const { execFile } = require("child_process");
+const util = require("util");
+
+const execFileAsync = util.promisify(execFile);
 
 const app = express();
 
@@ -9,29 +17,433 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
+const MCP_DIR = path.join(__dirname, "tiktok-downloader-mcp");
+const MCP_CLI = path.join(MCP_DIR, "dist", "index.js");
 
-// ========================================
-// HOME
-// ========================================
+const CACHE_DIR = path.join(os.tmpdir(), "rakib-tik-api-cache");
+
+const CACHE_TTL = 10 * 60 * 1000;
+const MAX_CACHE_SIZE = 100 * 1024 * 1024;
+
+fs.mkdirSync(CACHE_DIR, { recursive: true });
+
+const cache = new Map();
+const running = new Map();
+
+/* ----------------------------- helpers ----------------------------- */
+
+function jsonError(res, message, status = 400) {
+  return res.status(status).json({
+    status: false,
+    message
+  });
+}
+
+function hashUrl(url) {
+  return crypto
+    .createHash("sha256")
+    .update(url)
+    .digest("hex");
+}
+
+function validTikTokUrl(url) {
+  try {
+    const u = new URL(url);
+
+    return (
+      u.hostname.includes("tiktok.com") ||
+      u.hostname.includes("vt.tiktok.com") ||
+      u.hostname.includes("vm.tiktok.com")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function cleanupCache() {
+  const now = Date.now();
+
+  for (const [key, item] of cache.entries()) {
+    if (
+      now - item.createdAt > CACHE_TTL ||
+      !fs.existsSync(item.videoPath)
+    ) {
+      try {
+        if (item.dir && fs.existsSync(item.dir)) {
+          fs.rmSync(item.dir, {
+            recursive: true,
+            force: true
+          });
+        }
+      } catch {}
+
+      cache.delete(key);
+    }
+  }
+}
+
+function findVideoFile(dir) {
+  let result = null;
+
+  function walk(current) {
+    if (result) return;
+
+    let files;
+
+    try {
+      files = fs.readdirSync(current, {
+        withFileTypes: true
+      });
+    } catch {
+      return;
+    }
+
+    for (const entry of files) {
+      const full = path.join(current, entry.name);
+
+      if (entry.isDirectory()) {
+        walk(full);
+      } else if (
+        entry.isFile() &&
+        entry.name.toLowerCase().endsWith(".mp4")
+      ) {
+        result = full;
+        return;
+      }
+    }
+  }
+
+  walk(dir);
+
+  return result;
+}
+
+function findJsonFile(dir) {
+  let result = null;
+
+  function walk(current) {
+    if (result) return;
+
+    let files;
+
+    try {
+      files = fs.readdirSync(current, {
+        withFileTypes: true
+      });
+    } catch {
+      return;
+    }
+
+    for (const entry of files) {
+      const full = path.join(current, entry.name);
+
+      if (entry.isDirectory()) {
+        walk(full);
+      } else if (
+        entry.isFile() &&
+        entry.name === "post.json"
+      ) {
+        result = full;
+        return;
+      }
+    }
+  }
+
+  walk(dir);
+
+  return result;
+}
+
+function normalizePost(post) {
+  if (!post || typeof post !== "object") {
+    return {};
+  }
+
+  // tiktok-downloader-mcp structure:
+  // {
+  //   post_details: {...},
+  //   raw_tiktok_data: {...}
+  // }
+
+  const details =
+    post.post_details ||
+    post.postDetails ||
+    post;
+
+  const raw =
+    post.raw_tiktok_data ||
+    post.rawTikTokData ||
+    {};
+
+  const author =
+    details.author ||
+    raw.author ||
+    {};
+
+  const stats =
+    details.stats ||
+    {};
+
+  const rawStats = {
+    views:
+      stats.views ??
+      raw.play_count ??
+      0,
+
+    likes:
+      stats.likes ??
+      raw.digg_count ??
+      0,
+
+    comments:
+      stats.comments ??
+      raw.comment_count ??
+      0,
+
+    shares:
+      stats.shares ??
+      raw.share_count ??
+      0,
+
+    favorites:
+      stats.favorites ??
+      raw.collect_count ??
+      0,
+
+    downloads:
+      stats.downloads ??
+      raw.download_count ??
+      0,
+
+    totalInteractions:
+      stats.totalInteractions ??
+      0,
+
+    engagementRatePercent:
+      stats.engagementRatePercent ??
+      0
+  };
+
+  return {
+    id:
+      details.id ||
+      raw.id ||
+      null,
+
+    author: {
+      id:
+        author.id ||
+        null,
+
+      uniqueId:
+        author.uniqueId ||
+        author.unique_id ||
+        details.user ||
+        "",
+
+      nickname:
+        author.nickname ||
+        "",
+
+      avatar:
+        author.avatar ||
+        "",
+
+      profileUrl:
+        author.profileUrl ||
+        `https://www.tiktok.com/@${
+          author.uniqueId ||
+          author.unique_id ||
+          details.user ||
+          ""
+        }`
+    },
+
+    description:
+      details.title ||
+      raw.title ||
+      (Array.isArray(details.content_desc)
+        ? details.content_desc.filter(Boolean).join(" ")
+        : "") ||
+      "",
+
+    type:
+      details.media_type ||
+      "video",
+
+    date:
+      details.date ||
+      null,
+
+    timestamp:
+      details.timestamp ||
+      details.create_time ||
+      raw.create_time ||
+      null,
+
+    duration:
+      details.duration ||
+      raw.duration ||
+      0,
+
+    stats: rawStats,
+
+    cover:
+      raw.cover ||
+      "",
+
+    music: details.music || {
+      id:
+        raw.music_info?.id ||
+        null,
+
+      title:
+        raw.music_info?.title ||
+        "",
+
+      author:
+        raw.music_info?.author ||
+        "",
+
+      playUrl:
+        raw.music ||
+        raw.music_info?.play ||
+        ""
+    },
+
+    raw: post
+  };
+}
+
+/* ------------------------- TikTok extractor ------------------------- */
+
+async function extractTikTok(url) {
+  const key = hashUrl(url);
+
+  const cached = cache.get(key);
+
+  if (
+    cached &&
+    Date.now() - cached.createdAt < CACHE_TTL &&
+    fs.existsSync(cached.videoPath)
+  ) {
+    return cached;
+  }
+
+  if (running.has(key)) {
+    return running.get(key);
+  }
+
+  const task = (async () => {
+    const workDir = path.join(
+      CACHE_DIR,
+      `${key}-${Date.now()}`
+    );
+
+    fs.mkdirSync(workDir, {
+      recursive: true
+    });
+
+    try {
+      if (!fs.existsSync(MCP_CLI)) {
+        throw new Error(
+          "TikTok downloader is not built. Run: cd tiktok-downloader-mcp && npm run build"
+        );
+      }
+
+      await execFileAsync(
+        process.execPath,
+        [
+          MCP_CLI,
+          url,
+          "--out",
+          workDir
+        ],
+        {
+          cwd: MCP_DIR,
+          timeout: 120000,
+          maxBuffer: 10 * 1024 * 1024
+        }
+      );
+
+      const videoPath = findVideoFile(workDir);
+      const jsonPath = findJsonFile(workDir);
+
+      if (!videoPath) {
+        throw new Error(
+          "TikTok video could not be extracted"
+        );
+      }
+
+      const stat = fs.statSync(videoPath);
+
+      if (stat.size > MAX_CACHE_SIZE) {
+        throw new Error(
+          "Video file is too large"
+        );
+      }
+
+      let post = {};
+
+      if (jsonPath) {
+        try {
+          post = JSON.parse(
+            fs.readFileSync(jsonPath, "utf8")
+          );
+        } catch {}
+      }
+
+      const normalized = normalizePost(post);
+
+      const item = {
+        key,
+        url,
+        dir: workDir,
+        videoPath,
+        jsonPath,
+        post: normalized,
+        createdAt: Date.now(),
+        size: stat.size
+      };
+
+      cache.set(key, item);
+
+      return item;
+    } catch (error) {
+      try {
+        fs.rmSync(workDir, {
+          recursive: true,
+          force: true
+        });
+      } catch {}
+
+      throw error;
+    } finally {
+      running.delete(key);
+    }
+  })();
+
+  running.set(key, task);
+
+  return task;
+}
+
+/* ------------------------------- routes ------------------------------ */
 
 app.get("/", (req, res) => {
   res.json({
     status: true,
-    name: "Rakib TikTok Download API",
-    version: "3.0.0",
-    message: "TikTok Downloader API 🚀",
-
+    name: "RAKIB TIK API",
+    version: "2.0.0",
+    message: "TikTok API is running 🚀",
     endpoints: {
-      download: "/api/tiktok?url=TikTok_URL",
-      ping: "/ping"
+      info: "/",
+      ping: "/ping",
+      tiktok: "/api/tiktok?url=TikTok_URL",
+      stream: "/api/tiktok/stream?url=TikTok_URL"
     }
   });
 });
-
-
-// ========================================
-// PING
-// ========================================
 
 app.get("/ping", (req, res) => {
   res.json({
@@ -42,215 +454,228 @@ app.get("/ping", (req, res) => {
   });
 });
 
-
-// ========================================
-// TIKTOK DOWNLOAD
-// ========================================
+/* ----------------------------- main API ----------------------------- */
 
 app.get("/api/tiktok", async (req, res) => {
-
-  const { url } = req.query;
-
-  // ========================================
-  // URL CHECK
-  // ========================================
+  const url = req.query.url;
 
   if (!url) {
-    return res.status(400).json({
-      status: false,
-      message: "TikTok URL is required"
-    });
+    return jsonError(
+      res,
+      "TikTok URL is required"
+    );
   }
 
-  if (!/^https?:\/\/(?:www\.|m\.|vt\.|vm\.)?tiktok\.com\//i.test(url)) {
-    return res.status(400).json({
-      status: false,
-      message: "Invalid TikTok URL"
-    });
+  if (!validTikTokUrl(url)) {
+    return jsonError(
+      res,
+      "Invalid TikTok URL"
+    );
   }
-
-  console.log("");
-  console.log("========================================");
-  console.log("🎵 TIKTOK REQUEST");
-  console.log("========================================");
-  console.log("🔗 URL:", url);
 
   try {
+    const item = await extractTikTok(url);
 
-    // ========================================
-    // DOWNLOAD INFO
-    // ========================================
+    const post = item.post || {};
 
-    const result = await download(url);
+    const author = post.author || {};
 
-    console.log(
-      "📦 Downloader Result:",
-      JSON.stringify(result).slice(0, 1500)
-    );
+    const streamUrl =
+      `/api/tiktok/stream?url=${encodeURIComponent(url)}`;
 
-    if (!result?.ok) {
-      return res.status(500).json({
-        status: false,
-        message:
-          result?.error ||
-          result?.message ||
-          "TikTok download failed",
+    const base =
+      `${req.protocol}://${req.get("host")}`;
 
-        result: result || null
-      });
-    }
-
-    // ========================================
-    // MEDIA
-    // ========================================
-
-    const media = Array.isArray(result.media)
-      ? result.media
-      : [];
-
-    const hd =
-      media.find(
-        item =>
-          item.type === "video" &&
-          item.quality === "hd_no_watermark"
-      )?.url ||
-      result.video ||
-      null;
-
-    const sd =
-      media.find(
-        item =>
-          item.type === "video" &&
-          item.quality === "no_watermark"
-      )?.url ||
-      null;
-
-    const watermark =
-      media.find(
-        item =>
-          item.type === "video" &&
-          item.quality === "watermark"
-      )?.url ||
-      null;
-
-    // ========================================
-    // CHECK VIDEO
-    // ========================================
-
-    if (!hd && !sd && !watermark) {
-      return res.status(500).json({
-        status: false,
-        message: "TikTok video URL not found",
-        result: result
-      });
-    }
-
-    // ========================================
-    // RESPONSE
-    // ========================================
+    const mediaUrl = base + streamUrl;
 
     return res.json({
-
       status: true,
 
       author: {
         nickname:
-          result.author ||
-          "Unknown",
+          author.nickname ||
+          author.unique_id ||
+          author.username ||
+          "",
+
+        username:
+          author.uniqueId ||
+          author.unique_id ||
+          post.user ||
+          post.uniqueId ||
+          post.unique_id ||
+          "",
 
         avatar:
-          result.thumbnail ||
-          null
+          author.avatar ||
+          author.avatar_url ||
+          author.avatarLarger ||
+          ""
       },
 
       description:
-        result.title &&
-        !result.title.startsWith("Unknown tiktok aweme ID")
-          ? result.title
-          : "TikTok Video",
+        post.description || "",
 
       video: {
-        hd: hd,
-        sd: sd,
-        watermark: watermark
+        hd: mediaUrl,
+        sd: mediaUrl,
+        watermark: mediaUrl
       },
 
-      audio:
-        result.audio ||
-        media.find(
-          item => item.type === "audio"
-        )?.url ||
-        null,
+      type:
+        post.type || "video",
 
-      type: "video",
+      id:
+        post.id || null,
 
-      videoQuality:
-        result.videoQuality ||
-        "hd_no_watermark"
+      stats:
+        post.stats || {},
 
+      cached: true,
+
+      size:
+        item.size
     });
-
   } catch (error) {
-
     console.error(
-      "❌ TikTok Downloader Error:",
-      error
+      "[TIKTOK ERROR]",
+      error.message
     );
 
     return res.status(500).json({
-
       status: false,
+      message: "TikTok video information unavailable",
+      error: error.message
+    });
+  }
+});
 
-      message:
-        "TikTok download failed",
+/* ----------------------------- stream API ---------------------------- */
 
-      error:
-        error.message || "Unknown error"
+app.get("/api/tiktok/stream", async (req, res) => {
+  const url = req.query.url;
 
+  if (!url) {
+    return jsonError(
+      res,
+      "TikTok URL is required"
+    );
+  }
+
+  if (!validTikTokUrl(url)) {
+    return jsonError(
+      res,
+      "Invalid TikTok URL"
+    );
+  }
+
+  try {
+    const item = await extractTikTok(url);
+
+    if (!fs.existsSync(item.videoPath)) {
+      cache.delete(item.key);
+
+      return jsonError(
+        res,
+        "Cached video expired. Please try again.",
+        404
+      );
+    }
+
+    const stat = fs.statSync(item.videoPath);
+
+    res.setHeader(
+      "Content-Type",
+      "video/mp4"
+    );
+
+    res.setHeader(
+      "Content-Length",
+      stat.size
+    );
+
+    res.setHeader(
+      "Content-Disposition",
+      'inline; filename="tiktok.mp4"'
+    );
+
+    res.setHeader(
+      "Cache-Control",
+      "public, max-age=300"
+    );
+
+    const stream =
+      fs.createReadStream(item.videoPath);
+
+    stream.on("error", (error) => {
+      console.error(
+        "[STREAM ERROR]",
+        error.message
+      );
+
+      if (!res.headersSent) {
+        res.status(500).end();
+      }
     });
 
-  }
+    stream.pipe(res);
+  } catch (error) {
+    console.error(
+      "[STREAM ERROR]",
+      error.message
+    );
 
+    return res.status(500).json({
+      status: false,
+      message: "Unable to download TikTok video",
+      error: error.message
+    });
+  }
 });
 
+/* ------------------------------ cleanup ------------------------------ */
 
-// ========================================
-// 404
-// ========================================
-
-app.use((req, res) => {
-
-  res.status(404).json({
-
-    status: false,
-
-    message: "Endpoint not found",
-
-    path: req.originalUrl
-
-  });
-
-});
-
-
-// ========================================
-// START SERVER
-// ========================================
-
-app.listen(
-  PORT,
-  "0.0.0.0",
-  () => {
-
-    console.log("");
-    console.log("========================================");
-    console.log("🚀 RAKIB TIKTOK DOWNLOAD API");
-    console.log("========================================");
-    console.log(`📡 Port  : ${PORT}`);
-    console.log(`🌐 Local : http://localhost:${PORT}`);
-    console.log(`❤️ Ping  : http://localhost:${PORT}/ping`);
-    console.log("========================================");
-    console.log("");
-
-  }
+setInterval(
+  cleanupCache,
+  5 * 60 * 1000
 );
+
+process.on("SIGINT", () => {
+  console.log("Stopping RAKIB TIK API...");
+
+  try {
+    fs.rmSync(CACHE_DIR, {
+      recursive: true,
+      force: true
+    });
+  } catch {}
+
+  process.exit(0);
+});
+
+process.on("SIGTERM", () => {
+  console.log("Stopping RAKIB TIK API...");
+
+  try {
+    fs.rmSync(CACHE_DIR, {
+      recursive: true,
+      force: true
+    });
+  } catch {}
+
+  process.exit(0);
+});
+
+/* ------------------------------- server ------------------------------ */
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`
+
+         RAKIB TIK API v2.0.0        ║
+#
+
+ PORT    : ${PORT}
+ STATUS  : ONLINE 🚀
+ ENGINE  : tiktok-downloader-mcp
+`);
+});

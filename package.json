@@ -10,8 +10,9 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@tobyg74/tiktok-api-dl": "latest",
+    "@satorufx/mediadownloader": "^1.1.0",
+    "axios": "^1.20.0",
     "cors": "^2.8.6",
-    "express": "^5.1.0"
+    "express": "^5.2.1"
   }
 }

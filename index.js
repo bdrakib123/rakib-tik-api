@@ -1,6 +1,6 @@
 const express = require("express");
 const cors = require("cors");
-const TikTokAPI = require("@tobyg74/tiktok-api-dl");
+const { download } = require("@satorufx/mediadownloader");
 
 const app = express();
 
@@ -18,8 +18,9 @@ app.get("/", (req, res) => {
   res.json({
     status: true,
     name: "Rakib TikTok Download API",
-    version: "1.0.0",
+    version: "3.0.0",
     message: "TikTok Downloader API 🚀",
+
     endpoints: {
       download: "/api/tiktok?url=TikTok_URL",
       ping: "/ping"
@@ -47,71 +48,169 @@ app.get("/ping", (req, res) => {
 // ========================================
 
 app.get("/api/tiktok", async (req, res) => {
-  try {
-    const { url } = req.query;
 
-    if (!url) {
-      return res.status(400).json({
-        status: false,
-        message: "TikTok URL is required"
-      });
-    }
+  const { url } = req.query;
 
-    if (!/tiktok\.com/i.test(url)) {
-      return res.status(400).json({
-        status: false,
-        message: "Invalid TikTok URL"
-      });
-    }
+  // ========================================
+  // URL CHECK
+  // ========================================
 
-    console.log(`⬇️ TikTok Download: ${url}`);
-
-    const response = await TikTokAPI.Downloader(url, {
-      version: "v1"
+  if (!url) {
+    return res.status(400).json({
+      status: false,
+      message: "TikTok URL is required"
     });
+  }
 
-    if (
-      !response ||
-      response.status !== "success" ||
-      !response.result
-    ) {
+  if (!/^https?:\/\/(?:www\.|m\.|vt\.|vm\.)?tiktok\.com\//i.test(url)) {
+    return res.status(400).json({
+      status: false,
+      message: "Invalid TikTok URL"
+    });
+  }
+
+  console.log("");
+  console.log("========================================");
+  console.log("🎵 TIKTOK REQUEST");
+  console.log("========================================");
+  console.log("🔗 URL:", url);
+
+  try {
+
+    // ========================================
+    // DOWNLOAD INFO
+    // ========================================
+
+    const result = await download(url);
+
+    console.log(
+      "📦 Downloader Result:",
+      JSON.stringify(result).slice(0, 1500)
+    );
+
+    if (!result?.ok) {
       return res.status(500).json({
         status: false,
-        message: "TikTok video information unavailable",
-        result: response || null
+        message:
+          result?.error ||
+          result?.message ||
+          "TikTok download failed",
+
+        result: result || null
       });
     }
 
-    const data = response.result;
+    // ========================================
+    // MEDIA
+    // ========================================
+
+    const media = Array.isArray(result.media)
+      ? result.media
+      : [];
+
+    const hd =
+      media.find(
+        item =>
+          item.type === "video" &&
+          item.quality === "hd_no_watermark"
+      )?.url ||
+      result.video ||
+      null;
+
+    const sd =
+      media.find(
+        item =>
+          item.type === "video" &&
+          item.quality === "no_watermark"
+      )?.url ||
+      null;
+
+    const watermark =
+      media.find(
+        item =>
+          item.type === "video" &&
+          item.quality === "watermark"
+      )?.url ||
+      null;
+
+    // ========================================
+    // CHECK VIDEO
+    // ========================================
+
+    if (!hd && !sd && !watermark) {
+      return res.status(500).json({
+        status: false,
+        message: "TikTok video URL not found",
+        result: result
+      });
+    }
+
+    // ========================================
+    // RESPONSE
+    // ========================================
 
     return res.json({
+
       status: true,
 
       author: {
-        nickname: data.author?.nickname || null,
-        avatar: data.author?.avatar || null
+        nickname:
+          result.author ||
+          "Unknown",
+
+        avatar:
+          result.thumbnail ||
+          null
       },
 
-      description: data.desc || null,
+      description:
+        result.title &&
+        !result.title.startsWith("Unknown tiktok aweme ID")
+          ? result.title
+          : "TikTok Video",
 
       video: {
-        hd: data.videoHD || null,
-        sd: data.videoSD || null,
-        watermark: data.videoWatermark || null
+        hd: hd,
+        sd: sd,
+        watermark: watermark
       },
 
-      type: data.type || "video"
+      audio:
+        result.audio ||
+        media.find(
+          item => item.type === "audio"
+        )?.url ||
+        null,
+
+      type: "video",
+
+      videoQuality:
+        result.videoQuality ||
+        "hd_no_watermark"
+
     });
 
   } catch (error) {
-    console.error("DOWNLOAD ERROR:", error);
+
+    console.error(
+      "❌ TikTok Downloader Error:",
+      error
+    );
 
     return res.status(500).json({
+
       status: false,
-      message: "TikTok download failed",
-      error: error.message
+
+      message:
+        "TikTok download failed",
+
+      error:
+        error.message || "Unknown error"
+
     });
+
   }
+
 });
 
 
@@ -120,11 +219,17 @@ app.get("/api/tiktok", async (req, res) => {
 // ========================================
 
 app.use((req, res) => {
+
   res.status(404).json({
+
     status: false,
+
     message: "Endpoint not found",
+
     path: req.originalUrl
+
   });
+
 });
 
 
@@ -132,14 +237,20 @@ app.use((req, res) => {
 // START SERVER
 // ========================================
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log("");
-  console.log("========================================");
-  console.log("🚀 RAKIB TIKTOK DOWNLOAD API");
-  console.log("========================================");
-  console.log(`📡 Port  : ${PORT}`);
-  console.log(`🌐 Local : http://localhost:${PORT}`);
-  console.log(`❤️ Ping  : http://localhost:${PORT}/ping`);
-  console.log("========================================");
-  console.log("");
-});
+app.listen(
+  PORT,
+  "0.0.0.0",
+  () => {
+
+    console.log("");
+    console.log("========================================");
+    console.log("🚀 RAKIB TIKTOK DOWNLOAD API");
+    console.log("========================================");
+    console.log(`📡 Port  : ${PORT}`);
+    console.log(`🌐 Local : http://localhost:${PORT}`);
+    console.log(`❤️ Ping  : http://localhost:${PORT}/ping`);
+    console.log("========================================");
+    console.log("");
+
+  }
+);

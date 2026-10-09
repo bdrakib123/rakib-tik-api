@@ -6,6 +6,7 @@ const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
 const { execFile } = require("child_process");
+const { spawn } = require("child_process");
 const util = require("util");
 
 const execFileAsync = util.promisify(execFile);
@@ -16,6 +17,74 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
+
+const SEARCH_PORT = Number(process.env.SEARCH_PORT || 8001);
+const PYTHON_BIN =
+  process.env.PYTHON_BIN ||
+  path.join(__dirname, ".search-venv", "bin", "python");
+
+let searchProcess = null;
+
+function startSearchWorker() {
+  if (process.env.DISABLE_TIKTOK_SEARCH === "1") {
+    console.log("TikTok Search Worker: DISABLED");
+    return;
+  }
+
+  if (!fs.existsSync(PYTHON_BIN)) {
+    console.warn(`TikTok Search Worker: Python not found: ${PYTHON_BIN}`);
+    return;
+  }
+
+  searchProcess = spawn(
+    PYTHON_BIN,
+    [
+      "-m",
+      "uvicorn",
+      "search_server:app",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      String(SEARCH_PORT)
+    ],
+    {
+      cwd: __dirname,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"]
+    }
+  );
+
+  searchProcess.stdout.on("data", data => {
+    process.stdout.write(`[SEARCH] ${data}`);
+  });
+
+  searchProcess.stderr.on("data", data => {
+    process.stderr.write(`[SEARCH] ${data}`);
+  });
+
+  searchProcess.on("error", err => {
+    console.error("TikTok Search Worker error:", err.message);
+  });
+
+  searchProcess.on("exit", (code, signal) => {
+    console.log(
+      `TikTok Search Worker stopped. code=${code} signal=${signal}`
+    );
+    searchProcess = null;
+  });
+
+  console.log(
+    `TikTok Search Worker starting on 127.0.0.1:${SEARCH_PORT}`
+  );
+}
+
+function stopSearchWorker() {
+  if (searchProcess) {
+    searchProcess.kill("SIGTERM");
+    searchProcess = null;
+  }
+}
+
 
 const MCP_DIR = path.join(__dirname, "tiktok-downloader-mcp");
 const MCP_CLI = path.join(MCP_DIR, "dist", "index.js");
@@ -667,6 +736,52 @@ process.on("SIGTERM", () => {
 });
 
 /* ------------------------------- server ------------------------------ */
+
+
+app.post("/search", async (req, res) => {
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:${SEARCH_PORT}/search`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(req.body)
+      }
+    );
+
+    const text = await response.text();
+
+    res.status(response.status);
+
+    try {
+      return res.json(JSON.parse(text));
+    } catch {
+      return res.send(text);
+    }
+  } catch (error) {
+    console.error("Search proxy error:", error.message);
+
+    return res.status(503).json({
+      status: false,
+      error: "TikTok search service unavailable"
+    });
+  }
+});
+
+startSearchWorker();
+
+
+process.on("SIGINT", () => {
+  stopSearchWorker();
+  process.exit(0);
+});
+
+process.on("SIGTERM", () => {
+  stopSearchWorker();
+  process.exit(0);
+});
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`
